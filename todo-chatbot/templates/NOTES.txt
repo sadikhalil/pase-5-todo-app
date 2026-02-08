@@ -1,0 +1,64 @@
+1. Get the application URL by running these commands:
+{{- if .Values.httpRoute.enabled }}
+{{- if .Values.httpRoute.hostnames }}
+    export APP_HOSTNAME={{ .Values.httpRoute.hostnames | first }}
+{{- else }}
+    export APP_HOSTNAME=$(kubectl get --namespace {{(first .Values.httpRoute.parentRefs).namespace | default .Release.Namespace }} gateway/{{ (first .Values.httpRoute.parentRefs).name }} -o jsonpath="{.spec.listeners[0].hostname}")
+  {{- end }}
+{{- if and .Values.httpRoute.rules (first .Values.httpRoute.rules).matches (first (first .Values.httpRoute.rules).matches).path.value }}
+    echo "Visit http://$APP_HOSTNAME{{ (first (first .Values.httpRoute.rules).matches).path.value }} to use your application"
+
+    NOTE: Your HTTPRoute depends on the listener configuration of your gateway and your HTTPRoute rules.
+    The rules can be set for path, method, header and query parameters.
+    You can check the gateway configuration with 'kubectl get --namespace {{(first .Values.httpRoute.parentRefs).namespace | default .Release.Namespace }} gateway/{{ (first .Values.httpRoute.parentRefs).name }} -o yaml'
+{{- end }}
+{{- else if .Values.ingress.enabled }}
+{{- range $host := .Values.ingress.hosts }}
+  {{- range .paths }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ $host.host }}{{ .path }}
+  {{- end }}
+{{- end }}
+{{- else }}
+  echo "Accessing the Frontend:"
+  {{- if contains "NodePort" .Values.frontend.service.type }}
+  export FE_NODE_PORT=$(kubectl get --namespace {{ .Release.Namespace }} -o jsonpath="{.spec.ports[0].nodePort}" services {{ include "todo-chatbot.fullname" . }}-frontend)
+  export NODE_IP=$(kubectl get nodes --namespace {{ .Release.Namespace }} -o jsonpath="{.items[0].status.addresses[0].address}")
+  echo "  Frontend URL: http://$NODE_IP:$FE_NODE_PORT"
+  {{- else if contains "LoadBalancer" .Values.frontend.service.type }}
+  echo "  Frontend may take a few minutes to be available."
+  echo "  Watch its status by running 'kubectl get --namespace {{ .Release.Namespace }} svc -w {{ include "todo-chatbot.fullname" . }}-frontend'"
+  export FE_SERVICE_IP=$(kubectl get svc --namespace {{ .Release.Namespace }} {{ include "todo-chatbot.fullname" . }}-frontend --template "{{"{{ range (index .status.loadBalancer.ingress 0) }}{{.}}{{ end }}"}}")
+  echo "  Frontend URL: http://$FE_SERVICE_IP:{{ .Values.frontend.service.port }}"
+  {{- end }}
+
+  echo ""
+  echo "Accessing the Backend:"
+  {{- if contains "NodePort" .Values.backend.service.type }}
+  export BE_NODE_PORT=$(kubectl get --namespace {{ .Release.Namespace }} -o jsonpath="{.spec.ports[0].nodePort}" services {{ include "todo-chatbot.fullname" . }}-backend)
+  echo "  Backend URL: http://$NODE_IP:$BE_NODE_PORT"
+  {{- else if contains "LoadBalancer" .Values.backend.service.type }}
+  echo "  Backend may take a few minutes to be available."
+  echo "  Watch its status by running 'kubectl get --namespace {{ .Release.Namespace }} svc -w {{ include "todo-chatbot.fullname" . }}-backend'"
+  export BE_SERVICE_IP=$(kubectl get svc --namespace {{ .Release.Namespace }} {{ include "todo-chatbot.fullname" . }}-backend --template "{{"{{ range (index .status.loadBalancer.ingress 0) }}{{.}}{{ end }}"}}")
+  echo "  Backend URL: http://$BE_SERVICE_IP:{{ .Values.backend.service.port }}"
+  {{- end }}
+
+  {{- if contains "ClusterIP" .Values.frontend.service.type }}
+  echo ""
+  echo "For ClusterIP services, use port-forwarding to access them locally."
+  echo "  To access Frontend (if ClusterIP):"
+  echo "    export FE_POD_NAME=$(kubectl get pods --namespace {{ .Release.Namespace }} -l "app.kubernetes.io/name={{ include "todo-chatbot.name" . }},app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component=frontend" -o jsonpath="{.items[0].metadata.name}")"
+  echo "    export FE_CONTAINER_PORT=$(kubectl get pod --namespace {{ .Release.Namespace }} $FE_POD_NAME -o jsonpath="{.spec.containers[0].ports[0].containerPort}")"
+  echo "    echo "Visit http://127.0.0.1:8080 to use your frontend application (port-forwarded)""
+  echo "    kubectl --namespace {{ .Release.Namespace }} port-forward $FE_POD_NAME 8080:$FE_CONTAINER_PORT"
+  {{- end }}
+
+  {{- if contains "ClusterIP" .Values.backend.service.type }}
+  echo ""
+  echo "  To access Backend (if ClusterIP):"
+  echo "    export BE_POD_NAME=$(kubectl get pods --namespace {{ .Release.Namespace }} -l "app.kubernetes.io/name={{ include "todo-chatbot.name" . }},app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component=backend" -o jsonpath="{.items[0].metadata.name}")"
+  echo "    export BE_CONTAINER_PORT=$(kubectl get pod --namespace {{ .Release.Namespace }} $BE_POD_NAME -o jsonpath="{.spec.containers[0].ports[0].containerPort}")"
+  echo "    echo "Visit http://127.0.0.1:8081 to use your backend application (port-forwarded)""
+  echo "    kubectl --namespace {{ .Release.Namespace }} port-forward $BE_POD_NAME 8081:$BE_CONTAINER_PORT"
+  {{- end }}
+{{- end }}
