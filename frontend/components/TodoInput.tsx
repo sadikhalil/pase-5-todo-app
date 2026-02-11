@@ -13,14 +13,40 @@ const TodoInput: React.FC<TodoInputProps> = ({ placeholder = 'Add a new task...'
   const [dueDate, setDueDate] = useState<string>('');
   const [reminderDate, setReminderDate] = useState<string>('');
   const [priority, setPriority] = useState<'low' | 'medium' | 'high'>('medium');
+  const [tags, setTags] = useState<string[]>([]);
+  const [tagInput, setTagInput] = useState('');
+  const [recurrence, setRecurrence] = useState('none');
   const [isExpanded, setIsExpanded] = useState(false);
   const { addTodo } = useTodo();
+
+  const handleAddTag = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter' && tagInput.trim()) {
+      e.preventDefault();
+      const newTag = tagInput.trim().toLowerCase();
+      if (!tags.includes(newTag)) {
+        setTags([...tags, newTag]);
+      }
+      setTagInput('');
+    }
+  };
+
+  const handleRemoveTag = (tagToRemove: string) => {
+    setTags(tags.filter(t => t !== tagToRemove));
+  };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (inputValue.trim()) {
       // Create the task with all fields
-      addTodo(inputValue.trim(), description.trim() || undefined, dueDate ? new Date(dueDate) : undefined, reminderDate ? new Date(reminderDate) : undefined, priority);
+      addTodo(
+        inputValue.trim(),
+        description.trim() || undefined,
+        dueDate ? new Date(dueDate) : undefined,
+        reminderDate ? new Date(reminderDate) : undefined,
+        priority,
+        tags.length > 0 ? tags : undefined,
+        recurrence !== 'none' ? recurrence : undefined,
+      );
 
       // Reset form
       setInputValue('');
@@ -28,6 +54,9 @@ const TodoInput: React.FC<TodoInputProps> = ({ placeholder = 'Add a new task...'
       setDueDate('');
       setReminderDate('');
       setPriority('medium');
+      setTags([]);
+      setTagInput('');
+      setRecurrence('none');
       setIsExpanded(false);
     }
   };
@@ -132,7 +161,54 @@ const TodoInput: React.FC<TodoInputProps> = ({ placeholder = 'Add a new task...'
                     className="w-full px-3 py-2 bg-white text-navy-blue rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-orange focus:border-transparent"
                   />
                 </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-navy-blue dark:text-navy-blue mb-1">
+                    Recurrence
+                  </label>
+                  <select
+                    value={recurrence}
+                    onChange={(e) => setRecurrence(e.target.value)}
+                    className="w-full px-3 py-2 bg-white text-navy-blue rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-orange focus:border-transparent"
+                  >
+                    <option value="none">None</option>
+                    <option value="daily">Daily</option>
+                    <option value="weekly">Weekly</option>
+                    <option value="monthly">Monthly</option>
+                  </select>
+                </div>
               </div>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-navy-blue dark:text-navy-blue mb-1">
+                Tags
+              </label>
+              <div className="flex flex-wrap gap-2 mb-2">
+                {tags.map((tag) => (
+                  <span
+                    key={tag}
+                    className="inline-flex items-center gap-1 px-2 py-1 bg-blue-100 text-blue-700 rounded-md text-xs"
+                  >
+                    #{tag}
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveTag(tag)}
+                      className="text-blue-500 hover:text-blue-700 font-bold"
+                    >
+                      &times;
+                    </button>
+                  </span>
+                ))}
+              </div>
+              <input
+                type="text"
+                value={tagInput}
+                onChange={(e) => setTagInput(e.target.value)}
+                onKeyDown={handleAddTag}
+                placeholder="Type a tag and press Enter..."
+                className="w-full px-3 py-2 bg-white text-navy-blue rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-orange focus:border-transparent"
+              />
             </div>
           </motion.div>
         )}

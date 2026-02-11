@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import {
   DndContext,
   closestCenter,
@@ -16,16 +16,68 @@ import {
 import { useTodo } from '../contexts/TodoContext';
 import SortableTodoItem from './SortableTodoItem';
 import { AnimatePresence } from 'framer-motion';
+import { Todo } from '../types/todo';
+
+const PRIORITY_VALUE: Record<string, number> = { high: 3, medium: 2, low: 1 };
 
 const SortableTodoList: React.FC = () => {
   const { state, toggleTodo, deleteTodo, updateTodo, reorderTodos } = useTodo();
 
-  // Filter todos based on the current filter
-  const filteredTodos = state.todos.filter(todo => {
-    if (state.filter === 'active') return todo.status !== 'complete';
-    if (state.filter === 'completed') return todo.status === 'complete';
-    return true; // 'all'
-  });
+  const isManualSort = state.sortBy === 'manual';
+
+  // Multi-stage filter + sort pipeline
+  const processedTodos = useMemo(() => {
+    let result = [...state.todos];
+
+    // Stage 1: Status filter
+    if (state.filter === 'active') {
+      result = result.filter(todo => todo.status !== 'complete');
+    } else if (state.filter === 'completed') {
+      result = result.filter(todo => todo.status === 'complete');
+    }
+
+    // Stage 2: Priority filter
+    if (state.priorityFilter !== 'all') {
+      result = result.filter(todo => todo.priority === state.priorityFilter);
+    }
+
+    // Stage 3: Tag filter
+    if (state.tagFilter) {
+      result = result.filter(todo =>
+        (todo.tags || []).includes(state.tagFilter!)
+      );
+    }
+
+    // Stage 4: Sort (only when not manual)
+    if (!isManualSort) {
+      const multiplier = state.sortOrder === 'asc' ? 1 : -1;
+      result.sort((a: Todo, b: Todo) => {
+        switch (state.sortBy) {
+          case 'priority': {
+            const aVal = PRIORITY_VALUE[a.priority || 'medium'] || 2;
+            const bVal = PRIORITY_VALUE[b.priority || 'medium'] || 2;
+            return (aVal - bVal) * multiplier;
+          }
+          case 'dueDate': {
+            const aDate = a.dueDate ? new Date(a.dueDate).getTime() : Infinity;
+            const bDate = b.dueDate ? new Date(b.dueDate).getTime() : Infinity;
+            return (aDate - bDate) * multiplier;
+          }
+          case 'name':
+            return a.text.localeCompare(b.text) * multiplier;
+          case 'createdAt': {
+            const aTime = new Date(a.createdAt).getTime();
+            const bTime = new Date(b.createdAt).getTime();
+            return (aTime - bTime) * multiplier;
+          }
+          default:
+            return 0;
+        }
+      });
+    }
+
+    return result;
+  }, [state.todos, state.filter, state.priorityFilter, state.tagFilter, state.sortBy, state.sortOrder, isManualSort]);
 
   const sensors = useSensors(
     useSensor(PointerSensor),
@@ -35,18 +87,29 @@ const SortableTodoList: React.FC = () => {
   );
 
   const handleDragEnd = (event: DragEndEvent) => {
+    if (!isManualSort) return; // Ignore drag when sort is active
+
     const { active, over } = event;
 
     if (over && active.id !== over.id) {
-      // Find the active and over items in the filtered list
-      const activeIndex = filteredTodos.findIndex(todo => todo.id === active.id);
-      const overIndex = filteredTodos.findIndex(todo => todo.id === over.id);
+      const activeIndex = processedTodos.findIndex(todo => todo.id === active.id);
+      const overIndex = processedTodos.findIndex(todo => todo.id === over.id);
 
       if (activeIndex !== -1 && overIndex !== -1) {
-        // Use the reorderTodos function from context to update the order
         reorderTodos(String(active.id), String(over.id));
       }
     }
+  };
+
+  // Build empty state message based on active filters
+  const getEmptyMessage = () => {
+    const hasFilters = state.priorityFilter !== 'all' || state.tagFilter;
+    if (hasFilters) {
+      return 'No tasks match the current filters';
+    }
+    if (state.filter === 'completed') return 'No completed tasks yet';
+    if (state.filter === 'active') return 'No active tasks';
+    return 'Add your first task to get started!';
   };
 
   return (
@@ -57,13 +120,14 @@ const SortableTodoList: React.FC = () => {
     >
       <div className="w-full max-w-2xl">
         <SortableContext
-          items={filteredTodos.map(todo => todo.id)}
+          items={processedTodos.map(todo => todo.id)}
           strategy={verticalListSortingStrategy}
+          disabled={!isManualSort}
         >
           <AnimatePresence>
-            {filteredTodos.length > 0 ? (
+            {processedTodos.length > 0 ? (
               <ul className="space-y-3">
-                {filteredTodos.map(todo => (
+                {processedTodos.map(todo => (
                   <SortableTodoItem
                     key={todo.id}
                     todo={todo}
@@ -76,11 +140,7 @@ const SortableTodoList: React.FC = () => {
             ) : (
               <div className="text-center py-12">
                 <div className="text-gray-500 dark:text-gray-400 text-lg">
-                  {state.filter === 'completed'
-                    ? 'No completed tasks yet'
-                    : state.filter === 'active'
-                      ? 'No active tasks'
-                      : 'Add your first task to get started!'}
+                  {getEmptyMessage()}
                 </div>
               </div>
             )}

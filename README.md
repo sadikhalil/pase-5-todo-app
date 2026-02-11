@@ -204,3 +204,96 @@ This project was built for a hackathon with a focus on:
 ## License
 
 MIT License - See LICENSE file for details.
+
+## Phase 5: Kubernetes & Helm Deployment
+
+### Objective
+
+Phase 5 focuses on deploying the todo application using Kubernetes orchestration and Helm-based deployment. This phase transforms the containerized services into a production-ready, scalable architecture that can run consistently across different environments.
+
+### Architecture Overview
+
+In the Kubernetes deployment, the application consists of separate services that communicate through network endpoints rather than localhost:
+- **Frontend Service**: Next.js application running in Kubernetes pods, exposed via ingress/load balancer
+- **Backend Service**: FastAPI application with embedded MCP logic for chatbot-driven task execution
+- **PostgreSQL Service**: Database service with persistent storage for data durability
+
+All services communicate using Kubernetes DNS names rather than localhost, ensuring proper inter-service communication within the cluster. The backend contains the MCP logic internally and executes MCP operations within the backend process, eliminating the need for a separate MCP service or network communication.
+
+### Kubernetes Components
+
+The deployment includes the following Kubernetes resources:
+
+- **Deployments**: Manage the desired state of application pods, ensuring specified number of replicas are running
+- **Services**: Enable network connectivity between services and external access through ClusterIP, NodePort, or LoadBalancer types
+- **ConfigMaps**: Store non-sensitive configuration data such as application settings and feature flags
+- **PersistentVolumeClaims**: Provide persistent storage for PostgreSQL data, ensuring data durability across pod restarts
+- **Secrets**: Store sensitive information like database passwords and JWT secrets securely
+
+### Helm Chart Structure
+
+The application is deployed using a single Helm chart named `todo-chatbot` which manages all application components:
+
+```
+charts/todo-chatbot/
+├── templates/
+│   ├── frontend-deployment.yaml
+│   ├── frontend-service.yaml
+│   ├── backend-deployment.yaml
+│   ├── backend-service.yaml
+│   ├── postgresql-statefulset.yaml
+│   ├── postgresql-service.yaml
+│   └── ingress.yaml
+├── Chart.yaml
+└── values.yaml
+```
+
+The `values.yaml` file contains configurable parameters for all services, allowing customization of resource allocations, replica counts, environment variables, and service configurations.
+
+### Deployment Steps
+
+1. **Prepare the cluster**: Ensure Kubernetes cluster is accessible and kubectl is configured
+
+2. **Add Helm repository** (if using external charts):
+   ```bash
+   helm repo add bitnami https://charts.bitnami.com/bitnami
+   helm repo update
+   ```
+
+3. **Install the todo-chatbot application**:
+   ```bash
+   helm install todo-chatbot ./charts/todo-chatbot -f ./charts/todo-chatbot/values.yaml
+   ```
+
+4. **Upgrade the deployment** (when updating):
+   ```bash
+   helm upgrade todo-chatbot ./charts/todo-chatbot -f ./charts/todo-chatbot/values.yaml
+   ```
+
+### Environment Configuration
+
+Key environment variables required for Kubernetes deployment:
+
+- `DATABASE_URL`: Connection string for PostgreSQL database (e.g., `postgresql://user:pass@postgresql:5432/todo_db`)
+- `SECRET_KEY`: JWT secret key for authentication
+- `DEBUG`: Boolean flag to enable/disable debug mode
+- `NODE_ENV`: Environment mode for frontend (development/production)
+
+These variables are typically configured through ConfigMaps and Secrets in Kubernetes.
+
+### Validation Checklist
+
+- [ ] All pods are running and in Ready state (`kubectl get pods`)
+- [ ] Services are accessible within the cluster (`kubectl get svc`)
+- [ ] Frontend service is reachable from external clients
+- [ ] Backend service can connect to PostgreSQL database
+- [ ] End-to-end functionality verified through the deployed application
+- [ ] Persistent volumes properly attached to PostgreSQL pods
+- [ ] Horizontal Pod Autoscaler (if configured) responds to load
+- [ ] Health checks passing for all services
+- [ ] Configuration and secrets properly mounted in pods
+- [ ] Chatbot context-aware task resolution working correctly
+- [ ] Confirmation for destructive actions implemented
+- [ ] Metadata-aware task management operational
+- [ ] Persistent, stateless operations maintained
+- [ ] Fully MCP-backed execution verified

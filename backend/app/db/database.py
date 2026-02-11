@@ -39,34 +39,69 @@ else:
 from app.models.user import User
 from app.models.chat_models import Task, Conversation, Message
 
+
+def _migrate_sqlite(conn):
+    """Add missing columns for SQLite databases"""
+    from sqlalchemy import text
+
+    result = conn.execute(text("PRAGMA table_info(tasks)")).fetchall()
+    existing_columns = [row[1] for row in result]
+
+    migrations = {
+        "due_date": "ALTER TABLE tasks ADD COLUMN due_date DATETIME DEFAULT NULL",
+        "reminder_date": "ALTER TABLE tasks ADD COLUMN reminder_date DATETIME DEFAULT NULL",
+        "priority": "ALTER TABLE tasks ADD COLUMN priority TEXT DEFAULT 'medium'",
+        "tags": "ALTER TABLE tasks ADD COLUMN tags JSON DEFAULT NULL",
+        "recurrence": "ALTER TABLE tasks ADD COLUMN recurrence TEXT DEFAULT 'none'",
+        "reminder_enabled": "ALTER TABLE tasks ADD COLUMN reminder_enabled BOOLEAN DEFAULT 0",
+    }
+
+    for col_name, ddl in migrations.items():
+        if col_name not in existing_columns:
+            conn.execute(text(ddl))
+            conn.commit()
+
+
+def _migrate_postgresql(conn):
+    """Add missing columns for PostgreSQL databases"""
+    from sqlalchemy import text
+
+    result = conn.execute(text(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_name = 'tasks'"
+    )).fetchall()
+    existing_columns = [row[0] for row in result]
+
+    migrations = {
+        "due_date": "ALTER TABLE tasks ADD COLUMN due_date TIMESTAMP DEFAULT NULL",
+        "reminder_date": "ALTER TABLE tasks ADD COLUMN reminder_date TIMESTAMP DEFAULT NULL",
+        "priority": "ALTER TABLE tasks ADD COLUMN priority TEXT DEFAULT 'medium'",
+        "tags": "ALTER TABLE tasks ADD COLUMN tags JSON DEFAULT NULL",
+        "recurrence": "ALTER TABLE tasks ADD COLUMN recurrence TEXT DEFAULT 'none'",
+        "reminder_enabled": "ALTER TABLE tasks ADD COLUMN reminder_enabled BOOLEAN DEFAULT FALSE",
+    }
+
+    for col_name, ddl in migrations.items():
+        if col_name not in existing_columns:
+            conn.execute(text(ddl))
+            conn.commit()
+
+
 def create_db_and_tables():
     """
-    Create database tables and migrate schema if needed
+    Create database tables and migrate schema if needed.
+    Handles both SQLite and PostgreSQL backends.
     """
     # Create all tables if they don't exist
     SQLModel.metadata.create_all(engine)
 
-    # For SQLite, add any missing columns that might be needed
-    from sqlalchemy import text
-
-    # Check if the tasks table has the required columns and add them if missing
+    # Add any missing columns for existing tables
     with engine.connect() as conn:
-        # Get current table info
-        result = conn.execute(text("PRAGMA table_info(tasks)")).fetchall()
-        existing_columns = [row[1] for row in result]  # Column names are in the second position
+        if "postgresql" in DATABASE_URL:
+            _migrate_postgresql(conn)
+        else:
+            _migrate_sqlite(conn)
 
-        # Add missing columns if they don't exist - commit each separately
-        if 'due_date' not in existing_columns:
-            conn.execute(text("ALTER TABLE tasks ADD COLUMN due_date DATETIME DEFAULT NULL"))
-            conn.commit()
-
-        if 'reminder_date' not in existing_columns:
-            conn.execute(text("ALTER TABLE tasks ADD COLUMN reminder_date DATETIME DEFAULT NULL"))
-            conn.commit()
-
-        if 'priority' not in existing_columns:
-            conn.execute(text("ALTER TABLE tasks ADD COLUMN priority TEXT DEFAULT 'medium'"))
-            conn.commit()
 
 def get_session() -> Generator[Session, None, None]:
     """
@@ -75,32 +110,3 @@ def get_session() -> Generator[Session, None, None]:
     """
     with Session(engine) as session:
         yield session
-
-def create_db_and_tables():
-    """
-    Create database tables and migrate schema if needed
-    """
-    # Create all tables if they don't exist
-    SQLModel.metadata.create_all(engine)
-
-    # For SQLite, add any missing columns that might be needed
-    from sqlalchemy import text
-
-    # Check if the tasks table has the required columns and add them if missing
-    with engine.connect() as conn:
-        # Get current table info
-        result = conn.execute(text("PRAGMA table_info(tasks)")).fetchall()
-        existing_columns = [row[1] for row in result]  # Column names are in the second position
-
-        # Add missing columns if they don't exist - commit each separately
-        if 'due_date' not in existing_columns:
-            conn.execute(text("ALTER TABLE tasks ADD COLUMN due_date DATETIME DEFAULT NULL"))
-            conn.commit()
-
-        if 'reminder_date' not in existing_columns:
-            conn.execute(text("ALTER TABLE tasks ADD COLUMN reminder_date DATETIME DEFAULT NULL"))
-            conn.commit()
-
-        if 'priority' not in existing_columns:
-            conn.execute(text("ALTER TABLE tasks ADD COLUMN priority TEXT DEFAULT 'medium'"))
-            conn.commit()

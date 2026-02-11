@@ -60,6 +60,11 @@ dmypy.json
 # OS
 .DS_Store
 Thumbs.db
+nul
+
+# Windows Zone.Identifier metadata
+*:Zone.Identifier
+*Zone.Identifier
 
 # Logs
 *.log

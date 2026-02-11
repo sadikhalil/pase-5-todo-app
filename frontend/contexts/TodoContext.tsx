@@ -7,16 +7,24 @@ import apiClient from '../lib/apiClient';
 interface TodoState {
   todos: Todo[];
   filter: 'all' | 'active' | 'completed';
+  sortBy: 'manual' | 'priority' | 'dueDate' | 'name' | 'createdAt';
+  sortOrder: 'asc' | 'desc';
+  priorityFilter: 'all' | 'low' | 'medium' | 'high';
+  tagFilter: string | null;
 }
 
 interface TodoContextType {
   state: TodoState;
-  addTodo: (text: string, description?: string, dueDate?: Date, reminderDate?: Date, priority?: 'low' | 'medium' | 'high') => void;
+  addTodo: (text: string, description?: string, dueDate?: Date, reminderDate?: Date, priority?: 'low' | 'medium' | 'high', tags?: string[], recurrence?: string) => void;
   toggleTodo: (id: string) => void;
   deleteTodo: (id: string) => void;
-  updateTodo: (id: string, text: string, description?: string, dueDate?: Date, reminderDate?: Date, priority?: 'low' | 'medium' | 'high') => void;
+  updateTodo: (id: string, text: string, description?: string, dueDate?: Date, reminderDate?: Date, priority?: 'low' | 'medium' | 'high', tags?: string[], recurrence?: string) => void;
   clearCompleted: () => void;
   setFilter: (filter: 'all' | 'active' | 'completed') => void;
+  setSortBy: (sortBy: 'manual' | 'priority' | 'dueDate' | 'name' | 'createdAt') => void;
+  setSortOrder: (sortOrder: 'asc' | 'desc') => void;
+  setPriorityFilter: (priorityFilter: 'all' | 'low' | 'medium' | 'high') => void;
+  setTagFilter: (tagFilter: string | null) => void;
   reorderTodos: (activeId: string, overId: string) => void;
   refreshTodos: () => Promise<void>;
 }
@@ -30,10 +38,12 @@ const todoReducer = (state: TodoState, action: any): TodoState => {
         id: Date.now().toString(),
         text: action.payload.text,
         description: action.payload.description,
-        status: 'incomplete', // Changed from completed: false to status: 'incomplete'
+        status: 'incomplete',
         priority: action.payload.priority || 'medium',
         dueDate: action.payload.dueDate,
         reminderDate: action.payload.reminderDate,
+        tags: action.payload.tags || [],
+        recurrence: action.payload.recurrence || 'none',
         createdAt: new Date(),
         updatedAt: new Date(),
       };
@@ -70,6 +80,8 @@ const todoReducer = (state: TodoState, action: any): TodoState => {
                 priority: action.payload.priority ?? todo.priority,
                 dueDate: action.payload.dueDate ?? todo.dueDate,
                 reminderDate: action.payload.reminderDate ?? todo.reminderDate,
+                tags: action.payload.tags ?? todo.tags,
+                recurrence: action.payload.recurrence ?? todo.recurrence,
                 updatedAt: new Date()
               }
             : todo
@@ -110,6 +122,18 @@ const todoReducer = (state: TodoState, action: any): TodoState => {
         todos: action.payload.todos || [],
       };
 
+    case 'SET_SORT_BY':
+      return { ...state, sortBy: action.payload };
+
+    case 'SET_SORT_ORDER':
+      return { ...state, sortOrder: action.payload };
+
+    case 'SET_PRIORITY_FILTER':
+      return { ...state, priorityFilter: action.payload };
+
+    case 'SET_TAG_FILTER':
+      return { ...state, tagFilter: action.payload };
+
     default:
       return state;
   }
@@ -132,6 +156,10 @@ export const TodoProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return {
       todos: [],
       filter: 'all',
+      sortBy: 'manual',
+      sortOrder: 'desc',
+      priorityFilter: 'all',
+      tagFilter: null,
     };
   };
 
@@ -158,6 +186,8 @@ export const TodoProvider: React.FC<{ children: React.ReactNode }> = ({ children
             priority: todo.priority || 'medium',
             dueDate: todo.due_date ? new Date(todo.due_date) : undefined,
             reminderDate: todo.reminder_date ? new Date(todo.reminder_date) : undefined,
+            tags: todo.tags || [],
+            recurrence: todo.recurrence || 'none',
             createdAt: new Date(todo.created_at),
             updatedAt: new Date(todo.updated_at),
           }));
@@ -172,7 +202,7 @@ export const TodoProvider: React.FC<{ children: React.ReactNode }> = ({ children
     fetchTodos();
   }, [token]); // Fetch todos when token changes (on login/signup)
 
-  const addTodo = async (text: string, description?: string, dueDate?: Date, reminderDate?: Date, priority?: 'low' | 'medium' | 'high') => {
+  const addTodo = async (text: string, description?: string, dueDate?: Date, reminderDate?: Date, priority?: 'low' | 'medium' | 'high', tags?: string[], recurrence?: string) => {
     // Add locally first, then sync with backend if logged in
     dispatch({
       type: 'ADD_TODO',
@@ -181,7 +211,9 @@ export const TodoProvider: React.FC<{ children: React.ReactNode }> = ({ children
         description,
         dueDate,
         reminderDate,
-        priority: priority || 'medium'
+        priority: priority || 'medium',
+        tags: tags || [],
+        recurrence: recurrence || 'none',
       }
     });
 
@@ -197,12 +229,14 @@ export const TodoProvider: React.FC<{ children: React.ReactNode }> = ({ children
           due_date: dueDate ? dueDate.toISOString() : null,
           reminder_date: reminderDate ? reminderDate.toISOString() : null,
           priority: priority || 'medium',
+          tags: tags || [],
+          recurrence: recurrence || 'none',
+          reminder_enabled: !!reminderDate,
           status: 'incomplete'
         });
       } catch (error) {
         console.error('Failed to sync todo to backend:', error);
         showToast('Failed to sync task to server', 'warning');
-        // Keep the task in local state anyway
       }
     }
   };
@@ -249,7 +283,7 @@ export const TodoProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  const updateTodo = async (id: string, text: string, description?: string, dueDate?: Date, reminderDate?: Date, priority?: 'low' | 'medium' | 'high') => {
+  const updateTodo = async (id: string, text: string, description?: string, dueDate?: Date, reminderDate?: Date, priority?: 'low' | 'medium' | 'high', tags?: string[], recurrence?: string) => {
     const oldTodo = state.todos.find(t => t.id === id);
     if (!oldTodo) return;
 
@@ -262,7 +296,9 @@ export const TodoProvider: React.FC<{ children: React.ReactNode }> = ({ children
         description,
         dueDate,
         reminderDate,
-        priority
+        priority,
+        tags,
+        recurrence,
       }
     });
     showToast(`Updated: ${text.substring(0, 30)}${text.length > 30 ? '...' : ''}`, 'success');
@@ -275,12 +311,14 @@ export const TodoProvider: React.FC<{ children: React.ReactNode }> = ({ children
           description: description ?? oldTodo.description,
           due_date: dueDate ? dueDate.toISOString() : null,
           reminder_date: reminderDate ? reminderDate.toISOString() : null,
-          priority: priority ?? oldTodo.priority ?? 'medium'
+          priority: priority ?? oldTodo.priority ?? 'medium',
+          tags: tags ?? oldTodo.tags ?? [],
+          recurrence: recurrence ?? oldTodo.recurrence ?? 'none',
+          reminder_enabled: !!(reminderDate || oldTodo.reminderDate),
         });
       } catch (error) {
         console.error('Failed to sync update to backend:', error);
         showToast('Failed to sync update to server', 'warning');
-        // Keep the local update anyway
       }
     }
   };
@@ -316,6 +354,22 @@ export const TodoProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const setFilter = (filter: 'all' | 'active' | 'completed') => {
     dispatch({ type: 'SET_FILTER', payload: { filter } });
+  };
+
+  const setSortBy = (sortBy: 'manual' | 'priority' | 'dueDate' | 'name' | 'createdAt') => {
+    dispatch({ type: 'SET_SORT_BY', payload: sortBy });
+  };
+
+  const setSortOrder = (sortOrder: 'asc' | 'desc') => {
+    dispatch({ type: 'SET_SORT_ORDER', payload: sortOrder });
+  };
+
+  const setPriorityFilter = (priorityFilter: 'all' | 'low' | 'medium' | 'high') => {
+    dispatch({ type: 'SET_PRIORITY_FILTER', payload: priorityFilter });
+  };
+
+  const setTagFilter = (tagFilter: string | null) => {
+    dispatch({ type: 'SET_TAG_FILTER', payload: tagFilter });
   };
 
   const reorderTodos = (activeId: string, overId: string) => {
@@ -364,6 +418,8 @@ export const TodoProvider: React.FC<{ children: React.ReactNode }> = ({ children
             priority: todo.priority || 'medium',
             dueDate: todo.due_date ? new Date(todo.due_date) : undefined,
             reminderDate: todo.reminder_date ? new Date(todo.reminder_date) : undefined,
+            tags: todo.tags || [],
+            recurrence: todo.recurrence || 'none',
             createdAt: new Date(todo.created_at),
             updatedAt: new Date(todo.updated_at),
           };
@@ -391,6 +447,10 @@ export const TodoProvider: React.FC<{ children: React.ReactNode }> = ({ children
     updateTodo,
     clearCompleted,
     setFilter,
+    setSortBy,
+    setSortOrder,
+    setPriorityFilter,
+    setTagFilter,
     reorderTodos,
     refreshTodos,
   };

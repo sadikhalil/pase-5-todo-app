@@ -3,9 +3,26 @@ SQLModel Database Models
 Following the specified database schema
 """
 from sqlmodel import SQLModel, Field, Relationship
+from sqlalchemy import Column, JSON
 from typing import Optional, List, Dict, Any
 from datetime import datetime
+from enum import Enum
 import uuid
+
+
+class PriorityLevel(str, Enum):
+    """Task priority levels"""
+    low = "low"
+    medium = "medium"
+    high = "high"
+
+
+class RecurrenceType(str, Enum):
+    """Task recurrence patterns"""
+    none = "none"
+    daily = "daily"
+    weekly = "weekly"
+    monthly = "monthly"
 
 
 class Task(SQLModel, table=True):
@@ -20,7 +37,10 @@ class Task(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     due_date: Optional[datetime] = Field(default=None)
     reminder_date: Optional[datetime] = Field(default=None)
-    priority: str = Field(default="medium")
+    priority: str = Field(default=PriorityLevel.medium.value)
+    tags: Optional[List[str]] = Field(default=None, sa_column=Column(JSON, nullable=True))
+    recurrence: str = Field(default=RecurrenceType.none.value)
+    reminder_enabled: bool = Field(default=False)
 
 
 class Conversation(SQLModel, table=True):
@@ -57,17 +77,39 @@ class TaskCreate(SQLModel):
     completed: bool = False
     due_date: Optional[datetime] = None
     reminder_date: Optional[datetime] = None
-    priority: str = "medium"
+    priority: PriorityLevel = PriorityLevel.medium
+    tags: Optional[List[str]] = None
+    recurrence: RecurrenceType = RecurrenceType.none
+    reminder_enabled: bool = False
 
 
 class TaskUpdate(SQLModel):
     title: Optional[str] = None
     description: Optional[str] = None
     completed: Optional[bool] = None
+    due_date: Optional[datetime] = None
+    reminder_date: Optional[datetime] = None
+    priority: Optional[PriorityLevel] = None
+    tags: Optional[List[str]] = None
+    recurrence: Optional[RecurrenceType] = None
+    reminder_enabled: Optional[bool] = None
 
 
-class TaskResponse(Task):
-    pass
+class TaskResponse(SQLModel):
+    """Read-only response schema — not a DB table."""
+    id: Optional[int] = None
+    user_id: str
+    title: str
+    description: Optional[str] = None
+    completed: bool = False
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    due_date: Optional[datetime] = None
+    reminder_date: Optional[datetime] = None
+    priority: str = PriorityLevel.medium.value
+    tags: Optional[List[str]] = None
+    recurrence: str = RecurrenceType.none.value
+    reminder_enabled: bool = False
 
 
 class ChatRequest(SQLModel):

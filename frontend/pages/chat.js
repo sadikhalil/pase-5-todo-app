@@ -5,6 +5,7 @@ import { useRouter } from 'next/router';
 import { motion } from 'framer-motion';
 import apiClient from '../lib/apiClient';
 import { useTodo } from '../contexts/TodoContext';
+import EventToast, { useEventToasts } from '../components/EventToast';
 
 const ChatPage = () => {
   const [messages, setMessages] = useState([]);
@@ -13,9 +14,12 @@ const ChatPage = () => {
   const [error, setError] = useState(null);
   const [conversationId, setConversationId] = useState(null);
   const [userId, setUserId] = useState(null);
+  const [sseConnected, setSseConnected] = useState(false);
   const messagesEndRef = useRef(null);
+  const eventSourceRef = useRef(null);
   const router = useRouter();
-  const { refreshTodos } = useTodo(); // Get the refreshTodos function from TodoContext
+  const { refreshTodos } = useTodo();
+  const [toasts, addToast, dismissToast] = useEventToasts(5000);
 
   // Auto-scroll to bottom when messages change
   useEffect(() => {
@@ -39,6 +43,28 @@ const ChatPage = () => {
     setUserId(storedUserId);
   }, []);
 
+  // SSE connection for real-time event updates
+  useEffect(() => {
+    if (!userId) return;
+
+    const es = apiClient.connectEventStream(userId, (event) => {
+      addToast(event);
+      // Auto-refresh task list on any event
+      refreshTodos().catch((err) =>
+        console.error('Error refreshing todos from SSE:', err)
+      );
+    });
+
+    es.onopen = () => setSseConnected(true);
+    es.onerror = () => setSseConnected(false);
+    eventSourceRef.current = es;
+
+    return () => {
+      es.close();
+      setSseConnected(false);
+    };
+  }, [userId]);
+
   const handleSubmit = async (e) => {
     e.preventDefault();
 
@@ -58,43 +84,33 @@ const ChatPage = () => {
     setError(null);
 
     try {
-      // Use the API client to make the chat request
-      // The backend mounts the API router at /api, so the full path is /api/{userId}/chat
-      const data = await apiClient.request(`/api/${userId}/chat`, {
-        method: 'POST',
-        body: JSON.stringify({
-          conversation_id: conversationId,
-          message: inputValue
-        })
-      });
+      const data = await apiClient.sendChatMessage(userId, inputValue, conversationId);
 
       // Update conversation ID if it was created
       if (data.conversation_id && !conversationId) {
         setConversationId(data.conversation_id);
       }
 
-      // Add assistant message
+      // Add assistant message (includes event info)
       const assistantMessage = {
         id: Date.now() + 1,
         role: 'assistant',
         content: data.response,
         timestamp: new Date().toISOString(),
-        tool_calls: data.tool_calls || []
+        tool_calls: data.tool_calls || [],
+        events_published: data.events_published || [],
       };
 
       setMessages(prev => [...prev, assistantMessage]);
 
-      // Refresh todos to reflect any changes made through the chat
-      console.log('About to refresh todos after chat operation...');
-      console.log('Data received from backend:', data); // Debug log
-      setTimeout(() => {
-        console.log('Calling refreshTodos...');
-        refreshTodos().then(() => {
-          console.log('refreshTodos completed');
-        }).catch(error => {
-          console.error('Error in refreshTodos:', error);
-        });
-      }, 500); // Small delay to ensure the backend has processed the request
+      // Refresh todos when task-modifying events were published
+      if (data.events_published && data.events_published.length > 0) {
+        setTimeout(() => {
+          refreshTodos().catch(error => {
+            console.error('Error refreshing todos after event:', error);
+          });
+        }, 300);
+      }
     } catch (err) {
       setError(err.message);
       console.error('Chat error:', err);
@@ -135,6 +151,9 @@ const ChatPage = () => {
         <link rel="icon" href="/favicon.ico" />
       </Head>
 
+      {/* Toast notifications from SSE events */}
+      <EventToast toasts={toasts} onDismiss={dismissToast} />
+
       <div className="flex-1 flex flex-col bg-white dark:bg-navy-blue text-navy-blue dark:text-white transition-colors duration-200">
 
         {/* Chat Container */}
@@ -146,11 +165,19 @@ const ChatPage = () => {
             <p className="text-navy-blue dark:text-gray-300">
               Chat with your AI productivity assistant to manage tasks naturally
             </p>
-            {conversationId && (
-              <p className="text-sm text-gray-500 dark:text-gray-400 mt-2">
-                Conversation ID: {conversationId}
-              </p>
-            )}
+            <div className="flex items-center justify-center gap-2 mt-2">
+              {sseConnected && (
+                <span className="inline-flex items-center gap-1 text-xs text-green-600 dark:text-green-400">
+                  <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
+                  Live
+                </span>
+              )}
+              {conversationId && (
+                <span className="text-sm text-gray-500 dark:text-gray-400">
+                  Conversation: {conversationId}
+                </span>
+              )}
+            </div>
           </div>
 
           {/* Messages Container */}
@@ -166,7 +193,7 @@ const ChatPage = () => {
                   Start a conversation
                 </h3>
                 <p className="text-navy-blue dark:text-gray-300 max-w-md mx-auto">
-                  Try commands like "Add a task to buy groceries", "Show my tasks", or "Complete task 1".
+                  Try commands like "Add task Buy milk #shopping high priority", "Show my tasks", "Complete task 1", or "Update task 1 due tomorrow repeat weekly".
                 </p>
               </div>
             ) : (
@@ -189,7 +216,12 @@ const ChatPage = () => {
                     <div className="whitespace-pre-wrap break-words">{message.content}</div>
                     {message.tool_calls && message.tool_calls.length > 0 && (
                       <div className="mt-2 pt-2 border-t border-current/20 text-xs opacity-75">
-                        Actions taken: {message.tool_calls.map(tc => tc.name).join(', ')}
+                        Actions: {message.tool_calls.map(tc => tc.name).join(', ')}
+                      </div>
+                    )}
+                    {message.events_published && message.events_published.length > 0 && (
+                      <div className="mt-1 text-xs opacity-60">
+                        Events: {message.events_published.map(ev => ev.event_type).join(', ')}
                       </div>
                     )}
                     <div className={`text-xs mt-1 ${message.role === 'user' ? 'text-blue-100' : message.isError ? 'text-red-600 dark:text-red-300' : 'text-navy-blue/70'}`}>
@@ -248,7 +280,7 @@ const ChatPage = () => {
               </button>
             </div>
             <p className="text-xs text-gray-500 dark:text-gray-400 mt-2 text-center">
-              Try: "Add task", "Show tasks", "Complete task 1", "Delete task"
+              Try: "Add task Buy milk #shopping high priority", "Show tasks", "Complete task 1", "Update task 1 due tomorrow repeat weekly"
             </p>
           </form>
         </div>

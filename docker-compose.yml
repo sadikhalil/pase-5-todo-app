@@ -1,64 +1,104 @@
-version: '3.8'
+# ============================================================================
+# Phase 5 — Production Docker Compose
+# ============================================================================
+# Services: frontend | todo-api (backend) | mcp-server | db | redis
+#
+# MCP server is INTERNAL ONLY — no host port mapping.
+# Backend communicates with MCP via internal Docker network (http://mcp-server:8001).
+# Chatbot uses MCPTaskService in-process (shared service layer).
+# Both backend and MCP write to the SAME PostgreSQL database.
+# ============================================================================
 
 services:
-  #frontend:
-   # build:
-    #  context: ./frontend   # folder where your Next.js code and Dockerfile live
-    #ports:
-    #  - "3000:3000"
+  # ── Next.js Frontend ────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_BASE_URL: ${FRONTEND_API_URL:-http://localhost:8000}
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    depends_on:
+      - todo-api
+    restart: unless-stopped
+    networks:
+      - todo-network
 
-  services:
-  # Main Todo API Service
+  # ── FastAPI Backend (public) ────────────────────────────────────────────
   todo-api:
     build:
-      context: .
-      dockerfile: Dockerfile.api
+      context: ./backend
+      dockerfile: Dockerfile
     ports:
-      - "8000:8000"
+      - "${BACKEND_PORT:-8000}:8000"
     environment:
-      - DATABASE_URL=postgresql://postgres:password@db:5432/todo_db
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-todo_db}
+      - SECRET_KEY=${SECRET_KEY:-change-me-in-production-use-openssl-rand-hex-32}
+      - ALGORITHM=${ALGORITHM:-HS256}
+      - EVENT_BUS_BACKEND=${EVENT_BUS_BACKEND:-redis}
+      - REDIS_URL=redis://redis:6379
       - MCP_SERVER_URL=http://mcp-server:8001
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-your-super-secret-key-change-in-production}
     depends_on:
-      - db
-      - mcp-server
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      mcp-server:
+        condition: service_started
+    restart: unless-stopped
     networks:
       - todo-network
 
-  # MCP Server for Task Operations
+  # ── MCP Server (INTERNAL ONLY — no host port mapping) ───────────────────
   mcp-server:
     build:
-      context: .
+      context: ./backend
       dockerfile: Dockerfile.mcp
-    ports:
-      - "8001:8001"
+    # NO ports: section — not exposed to the host / internet
+    expose:
+      - "8001"   # accessible only within todo-network
     environment:
-      - DATABASE_URL=postgresql://postgres:password@db:5432/todo_db
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-your-super-secret-key-change-in-production}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-todo_db}
+      - SECRET_KEY=${SECRET_KEY:-change-me-in-production-use-openssl-rand-hex-32}
+      - EVENT_BUS_BACKEND=${EVENT_BUS_BACKEND:-redis}
+      - REDIS_URL=redis://redis:6379
     depends_on:
-      - db
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    restart: unless-stopped
     networks:
       - todo-network
 
-  # PostgreSQL Database
+  # ── PostgreSQL 15 ───────────────────────────────────────────────────────
   db:
     image: postgres:15
     environment:
-      - POSTGRES_DB=todo_db
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=password
-    ports:
-      - "5432:5432"
+      - POSTGRES_DB=${POSTGRES_DB:-todo_db}
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+    # NO ports: — not exposed to host
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
     networks:
       - todo-network
 
-  # Optional: Redis for caching/session management
+  # ── Redis 7 (event bus via Streams) ─────────────────────────────────────
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
+    command: redis-server --appendonly yes
+    # NO ports: — not exposed to host
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
     networks:
       - todo-network
 
@@ -68,3 +108,4 @@ networks:
 
 volumes:
   postgres_data:
+  redis_data:

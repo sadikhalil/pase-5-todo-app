@@ -224,6 +224,122 @@ As an operator, I want the application deployed on Kubernetes with event-driven 
 - **Recurrence**: Recurring tasks create new instances upon completion of previous instance (standard todo app behavior)
 - **Time Zones**: All dates/times stored in UTC, displayed in user's local timezone (web standard)
 
+## Phase 5: Event-Driven AI Todo System
+
+This phase transforms the existing todo application into a cloud-native, event-driven system with advanced task management capabilities. The system will leverage modern distributed computing patterns with Dapr and Kafka for scalable, resilient operations.
+
+### Architecture
+
+- **Event-Driven Architecture**: Implement Kafka-based messaging system using Dapr pub/sub component for asynchronous communication between services
+- **Service Separation**: Maintain clear separation between frontend, backend API (with embedded MCP logic), and reminder/consumer services
+- **MCP Server Integration**: Backend MUST contain embedded MCP logic for task execution operations, with MCP functionality integrated internally within the backend service
+- **Centralized Task Execution**: All task execution operations MUST route through the embedded MCP logic within the backend as the central task execution layer
+- **Stateless Chatbot**: Implement zero in-memory state in the chatbot, relying entirely on external storage for conversation history
+- **Dapr Integration**: Utilize Dapr for pub/sub, state management, secret management, and scheduled tasks
+
+### Functional Requirements
+
+- **FR-031**: System MUST support task priority levels (High, Medium, Low) with proper sorting and display
+- **FR-032**: System MUST support tagging of tasks with multiple tags per task and tag-based filtering
+- **FR-033**: System MUST support due dates with timezone-aware scheduling and display
+- **FR-034**: System MUST support recurring tasks with configurable patterns (daily, weekly, monthly, yearly)
+- **FR-035**: System MUST support reminder notifications with configurable lead times
+- **FR-036**: System MUST publish task lifecycle events (created, updated, completed, deleted) to Kafka topics
+- **FR-037**: System MUST process task-related events asynchronously via consumer services
+- **FR-038**: Backend with embedded MCP logic MUST handle all task execution operations as the mandatory task execution layer
+- **FR-039**: Chatbot service MUST maintain zero in-memory state and retrieve all context from persistent storage
+- **FR-040**: Reminder service MUST consume task events and trigger notifications at specified times
+- **FR-041**: Chatbot MUST provide context-aware task resolution based on conversation history and user context
+- **FR-042**: Chatbot MUST require confirmation for destructive actions such as task deletion or bulk operations
+- **FR-043**: Chatbot MUST support metadata-aware tasks with priority, tags, due dates, and recurrence patterns
+- **FR-044**: Chatbot MUST maintain persistent, stateless operations with all context stored externally
+- **FR-045**: All chatbot operations MUST be backed by MCP execution for consistent task management
+
+### Non-Functional Requirements
+
+- **NFR-005**: System MUST achieve 99.9% availability for task operations in production environment
+- **NFR-006**: Event processing latency MUST be under 5 seconds for 95% of events
+- **NFR-007**: System MUST handle up to 10,000 concurrent users with minimal performance degradation
+- **NFR-008**: All services MUST be stateless except for designated persistence layers
+- **NFR-009**: All configuration MUST be managed through environment variables
+- **NFR-010**: All secrets MUST be managed through secure secret stores (not hardcoded)
+- **NFR-011**: Logging MUST be implemented consistently across all services for observability
+- **NFR-012**: System MUST support graceful degradation when individual services are unavailable
+
+### Deployment
+
+- **Kubernetes Orchestration**: Deploy entire system using Kubernetes with proper resource allocation
+- **Helm Charts**: Package all services using Helm charts for consistent deployment across environments
+- **Local Deployment**: Support local Kubernetes deployment (minikube/kind) for development
+- **Cloud Deployment**: Support cloud Kubernetes deployment (EKS/AKS/GKE) for production
+- **Service Discovery**: Implement proper service discovery mechanisms within Kubernetes
+- **Resource Management**: Define appropriate CPU/memory limits and requests for all services
+- **Health Checks**: Implement readiness and liveness probes for all services
+- **Scaling**: Configure horizontal pod autoscaling based on resource utilization
+
+### Acceptance Criteria & Validation Checklist
+
+#### Event-Driven Architecture Validation
+- [ ] Kafka messaging system successfully handles task lifecycle events
+- [ ] Dapr pub/sub component properly configured and functioning
+- [ ] Events are published to appropriate topics when tasks are created/updated/completed/deleted
+- [ ] Consumer services successfully process events from Kafka topics
+- [ ] Event processing maintains data consistency across services
+
+#### MCP Server Integration Validation
+- [ ] All task execution operations route through MCP server
+- [ ] MCP server handles task operations correctly without direct database access
+- [ ] Task execution maintains proper error handling and validation
+- [ ] MCP server integrates seamlessly with event-driven architecture
+
+#### Advanced Task Capabilities Validation
+- [ ] Priority levels (High, Medium, Low) correctly applied and displayed
+- [ ] Tagging system allows multiple tags per task with proper filtering
+- [ ] Due date functionality includes timezone awareness and proper scheduling
+- [ ] Recurring tasks generate new instances according to configured patterns
+- [ ] Reminder notifications trigger at specified times with proper delivery
+
+#### Stateless Chatbot Validation
+- [ ] Chatbot maintains zero in-memory state between requests
+- [ ] Conversation history retrieved from persistent storage
+- [ ] Natural language processing remains functional without in-memory context
+- [ ] Chatbot session data properly isolated between users
+
+#### Deployment Validation
+- [ ] All services successfully deploy using Helm charts in local Kubernetes
+- [ ] All services successfully deploy using Helm charts in cloud Kubernetes
+- [ ] Services properly discover and communicate with each other
+- [ ] Health checks pass and scaling works appropriately
+- [ ] Resource limits and requests properly configured
+
+#### Security & Configuration Validation
+- [ ] All configuration managed through environment variables
+- [ ] No hardcoded secrets in code or configuration files
+- [ ] Proper authentication/authorization maintained across services
+- [ ] Logs provide adequate visibility for troubleshooting
+
+#### Observability Validation
+- [ ] Consistent logging implemented across all services
+- [ ] Log format follows established standards for easy parsing
+- [ ] Critical operations properly logged for audit purposes
+- [ ] Error conditions properly logged with sufficient context
+
+---
+
+### Known Phase-5 Development Limitations
+
+The following limitations are intentional and acceptable for Phase-5 development scope. Production hardening is deferred to later phases.
+
+1. **In-process reminder state (`_pending_reminders`)**: Reminder scheduling state is held in process memory and is not restart-persistent. A service restart will lose any pending reminder timers. Durable reminder scheduling (e.g., via a persistent job store or Dapr scheduled tasks) is deferred to production hardening.
+
+2. **InMemoryEventBus durability**: The `InMemoryEventBus` uses in-process `asyncio.Queue` instances. In-flight events that have not yet been consumed will be lost on process restart. Migration to a durable broker (e.g., Kafka via Dapr pub/sub) for at-least-once delivery is deferred to later phases.
+
+3. **Redis publish failure handling**: Redis event publishing is fire-and-forget. There is no outbox pattern, retry mechanism, or dead-letter queue. If a Redis publish call fails, the event is silently dropped. Implementing transactional outbox or retry logic is deferred to production hardening.
+
+These are development-scope trade-offs that do not affect Phase-5 functional correctness. They will be addressed when the system transitions to a production-grade deployment with Dapr, Kafka, and persistent schedulers.
+
+---
+
 ## Success Criteria *(mandatory)*
 
 ### Measurable Outcomes

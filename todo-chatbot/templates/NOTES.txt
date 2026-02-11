@@ -62,3 +62,20 @@
   echo "    kubectl --namespace {{ .Release.Namespace }} port-forward $BE_POD_NAME 8081:$BE_CONTAINER_PORT"
   {{- end }}
 {{- end }}
+
+2. Infrastructure services:
+{{- if .Values.postgresql.enabled }}
+  echo ""
+  echo "PostgreSQL:"
+  echo "  Internal service: {{ include "todo-chatbot.fullname" . }}-postgresql:{{ .Values.postgresql.service.port }}"
+  echo "  Database: {{ .Values.postgresql.auth.database }}"
+  echo "  User: {{ .Values.postgresql.auth.username }}"
+  echo "  The backend init container waits for PostgreSQL readiness before starting."
+{{- end }}
+{{- if .Values.redis.enabled }}
+  echo ""
+  echo "Redis (Event Bus):"
+  echo "  Internal service: {{ include "todo-chatbot.fullname" . }}-redis:{{ .Values.redis.service.port }}"
+  echo "  Event bus backend: {{ .Values.backend.env.EVENT_BUS_BACKEND }}"
+  echo "  Persistence: {{ if .Values.redis.persistence.enabled }}enabled ({{ .Values.redis.persistence.size }}){{ else }}disabled{{ end }}"
+{{- end }}

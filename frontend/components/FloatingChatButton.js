@@ -1,13 +1,21 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useTodo } from '../contexts/TodoContext';
+import apiClient from '../lib/apiClient';
+import EventToast, { useEventToasts } from './EventToast';
 
-// Helper function to safely get token from localStorage
-const getToken = () => {
-  if (typeof window !== 'undefined') {
-    return localStorage.getItem('access_token') || localStorage.getItem('token');
-  }
-  return null;
+const EVENT_LABELS = {
+  'task.created': 'Created',
+  'task.updated': 'Updated',
+  'task.completed': 'Completed',
+  'task.deleted': 'Deleted',
+};
+
+const EVENT_COLORS = {
+  'task.created': 'bg-green-100 text-green-800',
+  'task.updated': 'bg-blue-100 text-blue-800',
+  'task.completed': 'bg-purple-100 text-purple-800',
+  'task.deleted': 'bg-red-100 text-red-800',
 };
 
 const FloatingChatButton = ({ userId, userToken }) => {
@@ -15,7 +23,32 @@ const FloatingChatButton = ({ userId, userToken }) => {
   const [messages, setMessages] = useState([]);
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const { refreshTodos } = useTodo(); // Hook to refresh tasks after chat operations
+  const [conversationId, setConversationId] = useState(null);
+  const [sseConnected, setSseConnected] = useState(false);
+  const eventSourceRef = useRef(null);
+  const { refreshTodos } = useTodo();
+  const [toasts, addToast, dismissToast] = useEventToasts(5000);
+
+  // SSE connection for real-time event updates
+  useEffect(() => {
+    if (!userId) return;
+
+    const es = apiClient.connectEventStream(userId, (event) => {
+      addToast(event);
+      refreshTodos().catch((err) =>
+        console.error('Error refreshing todos from SSE:', err)
+      );
+    });
+
+    es.onopen = () => setSseConnected(true);
+    es.onerror = () => setSseConnected(false);
+    eventSourceRef.current = es;
+
+    return () => {
+      es.close();
+      setSseConnected(false);
+    };
+  }, [userId]);
 
   const toggleChat = () => {
     setIsOpen(!isOpen);
@@ -37,66 +70,32 @@ const FloatingChatButton = ({ userId, userToken }) => {
     setIsLoading(true);
 
     try {
-      const BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
-      const response = await fetch(`${BASE_URL}/api/${userId}/chat`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${userToken}`
-        },
-        body: JSON.stringify({
-          message: inputValue,
-          user_id: userId
-        })
-      });
+      const data = await apiClient.sendChatMessage(userId, inputValue, conversationId);
 
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+      if (data.conversation_id && !conversationId) {
+        setConversationId(data.conversation_id);
       }
-
-      const data = await response.json();
 
       const assistantMessage = {
         id: Date.now() + 1,
         role: 'assistant',
         content: data.response,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        tool_calls: data.tool_calls || [],
+        events_published: data.events_published || [],
       };
 
       setMessages(prev => [...prev, assistantMessage]);
 
-      // Check if the original user message contained task-related commands to trigger refresh
-      const userInput = inputValue.toLowerCase();
-      const hasTaskCommand = userInput.includes('add task') ||
-                            userInput.includes('add a task') ||
-                            userInput.includes('create task') ||
-                            userInput.includes('create a task') ||
-                            userInput.includes('delete task') ||
-                            userInput.includes('delete the task') ||
-                            userInput.includes('complete task') ||
-                            userInput.includes('mark task') ||
-                            userInput.includes('update task') ||
-                            userInput.includes('edit task');
-
-      if (hasTaskCommand) {
-        // Small delay to ensure the backend operation completes before refreshing
+      // Refresh todos when task-modifying events were published
+      if (data.events_published && data.events_published.length > 0) {
         setTimeout(async () => {
           try {
-            console.log('Refreshing tasks after chat operation...');
             await refreshTodos();
-            console.log('Tasks refreshed successfully');
           } catch (error) {
-            console.error('Failed to refresh tasks after chat operation:', error);
-            // Retry after a short delay if it fails
-            setTimeout(async () => {
-              try {
-                await refreshTodos();
-              } catch (retryError) {
-                console.error('Retry to refresh tasks also failed:', retryError);
-              }
-            }, 1500);
+            console.error('Failed to refresh tasks after event:', error);
           }
-        }, 800); // Reduced delay to make it more responsive
+        }, 300);
       }
     } catch (err) {
       const errorMessage = {
@@ -119,6 +118,9 @@ const FloatingChatButton = ({ userId, userToken }) => {
 
   return (
     <>
+      {/* Toast notifications from SSE events */}
+      <EventToast toasts={toasts} onDismiss={dismissToast} />
+
       {/* Floating Chat Button */}
       <motion.button
         onClick={toggleChat}
@@ -151,6 +153,12 @@ const FloatingChatButton = ({ userId, userToken }) => {
                 <div className="flex items-center space-x-2">
                   <span className="text-lg">🤖</span>
                   <h3 className="font-semibold">AI Assistant</h3>
+                  {sseConnected && (
+                    <span className="inline-flex items-center gap-1 text-[10px] text-green-300">
+                      <span className="w-1.5 h-1.5 bg-green-400 rounded-full animate-pulse"></span>
+                      Live
+                    </span>
+                  )}
                 </div>
                 <button
                   onClick={toggleChat}
@@ -168,6 +176,7 @@ const FloatingChatButton = ({ userId, userToken }) => {
                       💬
                     </div>
                     <p className="text-sm">Start a conversation with your AI assistant</p>
+                    <p className="text-xs mt-1 opacity-60">Try: "add task Buy milk #shopping high priority"</p>
                   </div>
                 ) : (
                   messages.map((message) => (
@@ -187,6 +196,30 @@ const FloatingChatButton = ({ userId, userToken }) => {
                         }`}
                       >
                         <div className="whitespace-pre-wrap break-words text-sm">{message.content}</div>
+
+                        {/* Tool call badges */}
+                        {message.tool_calls && message.tool_calls.length > 0 && (
+                          <div className="mt-1.5 pt-1.5 border-t border-current/20 text-xs opacity-75">
+                            Actions: {message.tool_calls.map(tc => tc.name).join(', ')}
+                          </div>
+                        )}
+
+                        {/* Event badges */}
+                        {message.events_published && message.events_published.length > 0 && (
+                          <div className="mt-1 flex flex-wrap gap-1">
+                            {message.events_published.map((ev, i) => (
+                              <span
+                                key={i}
+                                className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                                  EVENT_COLORS[ev.event_type] || 'bg-gray-100 text-gray-800'
+                                }`}
+                              >
+                                {EVENT_LABELS[ev.event_type] || ev.event_type}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+
                         <div className={`text-xs mt-1 ${message.role === 'user' ? 'text-blue-100' : message.isError ? 'text-red-600 dark:text-red-300' : 'text-navy-blue/70'}`}>
                           {formatTimestamp(message.timestamp)}
                         </div>

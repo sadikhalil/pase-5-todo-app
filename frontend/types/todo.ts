@@ -6,6 +6,8 @@ export interface Todo {
   priority?: 'low' | 'medium' | 'high';
   dueDate?: Date;
   reminderDate?: Date;
+  tags?: string[];
+  recurrence?: string;
   createdAt: Date;
   updatedAt: Date;
 }

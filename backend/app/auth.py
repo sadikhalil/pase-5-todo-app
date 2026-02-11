@@ -82,6 +82,7 @@ class LoginRequest(BaseModel):
     password: str
 
 @router.post("/signup", response_model=Token)
+@router.post("/register", response_model=Token)
 def signup(user_data: RegisterRequest, session: Session = Depends(get_session)):
     # Check if user already exists
     statement = select(User).where(User.email == user_data.email)

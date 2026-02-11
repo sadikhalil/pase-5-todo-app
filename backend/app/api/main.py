@@ -1,38 +1,67 @@
 """
-Main Todo Application API Server
-Stateless server that handles task operations directly in the database
+Main Todo Application API Server — Phase 5 (Event-Driven)
+
+Stateless chatbot that:
+  1. Parses user intent via lightweight NLP.
+  2. Executes task operations through the embedded MCP service layer.
+  3. Publishes lifecycle events to the async event bus.
+  4. Stores conversation history in the database (zero in-memory state).
+  5. Returns an immediate confirmation to the caller.
+
+All background work (reminders, recurrence, notifications) is handled by
+subscriber services consuming events from the bus — the chatbot never
+blocks on them.
 """
-from fastapi import APIRouter, HTTPException, Depends
+import re
+import logging
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+import asyncio
+import json as json_module
+
+from fastapi import APIRouter, HTTPException, Depends, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
-from typing import Optional, List
-import os
-from datetime import datetime
 from sqlmodel import Session, select
-import httpx
+from sse_starlette.sse import EventSourceResponse
 import jwt
-from datetime import datetime, timedelta
 
 from app.db.database import get_session
-from app.models.chat_models import Conversation, Message, Task, TaskCreate
+from app.models.chat_models import (
+    Conversation,
+    Message,
+    TaskCreate as ModelTaskCreate,
+    TaskUpdate as ModelTaskUpdate,
+    PriorityLevel,
+    RecurrenceType,
+)
 from app.models.user import User, TokenData
-from app.api.tasks import router as tasks_router
+from app.services.task_service import MCPTaskService, TaskService, _task_payload
+from app.events.event_bus import event_bus
+from app.events.event_types import TOPIC_TASK_LIFECYCLE, make_task_event, EVENT_TASK_UPDATED
+from app.events.subscribers import sse_connect, sse_disconnect
 
-# Create router
+import os
+
+logger = logging.getLogger(__name__)
+
+# ── Router ──────────────────────────────────────────────────────────────
 router = APIRouter()
 
-# NOTE: Tasks routes are now included directly in main.py at /tasks
-# to match frontend expectations
-
-# JWT Configuration
-SECRET_KEY = os.getenv("SECRET_KEY", "your-super-secret-and-long-random-string-here-change-this-in-production")
+# ── JWT / Auth ──────────────────────────────────────────────────────────
+SECRET_KEY = os.getenv(
+    "SECRET_KEY",
+    "your-super-secret-and-long-random-string-here-change-this-in-production",
+)
 ALGORITHM = os.getenv("ALGORITHM", "HS256")
-
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
 
-async def get_current_user_from_token(token: str = Depends(oauth2_scheme), session: Session = Depends(get_session)):
-    from fastapi import status
+async def get_current_user_from_token(
+    token: str = Depends(oauth2_scheme),
+    session: Session = Depends(get_session),
+):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -47,329 +76,540 @@ async def get_current_user_from_token(token: str = Depends(oauth2_scheme), sessi
     except jwt.PyJWTError:
         raise credentials_exception
 
-    statement = select(User).where(User.email == token_data.email)
-    user = session.exec(statement).first()
-
+    user = session.exec(select(User).where(User.email == token_data.email)).first()
     if user is None:
         raise credentials_exception
     return user
 
-# Configuration
-INTERNAL_TOKEN = os.getenv("INTERNAL_TOKEN", "secret-token-change-in-production")
+
+# ── Request / Response Models ───────────────────────────────────────────
 
 class ChatRequest(BaseModel):
     message: str
     user_id: Optional[str] = None
-    conversation_id: Optional[str] = None  # Made optional since we get it from the URL path
+    conversation_id: Optional[str] = None
 
-from typing import Optional, List, Dict, Any
 
 class ChatResponse(BaseModel):
     response: str
     conversation_id: str
-    tool_calls: Optional[List[Dict[str, Any]]] = None  # Track tool calls made during the interaction
-    task_operations: Optional[Dict[str, Any]] = None  # Track any task operations performed
+    tool_calls: Optional[List[Dict[str, Any]]] = None
+    task_operations: Optional[Dict[str, Any]] = None
+    events_published: Optional[List[Dict[str, Any]]] = None
 
 
-# Task-related models and endpoints
-class TaskResponse(BaseModel):
-    id: int
-    user_id: str
-    title: str
-    description: Optional[str] = None
-    completed: bool = False
-    created_at: datetime
-    updated_at: datetime
-    due_date: Optional[datetime] = None
-    reminder_date: Optional[datetime] = None
-    priority: str = "medium"
+# ── NLP Helpers (stateless, pure functions) ──────────────────────────────
+
+_PRIORITY_MAP = {
+    "high": "high", "urgent": "high", "important": "high",
+    "medium": "medium", "normal": "medium", "default": "medium",
+    "low": "low", "minor": "low",
+}
+
+_RECURRENCE_MAP = {
+    "daily": "daily", "every day": "daily",
+    "weekly": "weekly", "every week": "weekly",
+    "monthly": "monthly", "every month": "monthly",
+}
 
 
-class TaskUpdate(BaseModel):
-    title: Optional[str] = None
-    description: Optional[str] = None
-    completed: Optional[bool] = None
+def _extract_task_metadata(message: str) -> Dict[str, Any]:
+    """Extract Phase 5 metadata from a natural-language message.
+
+    Returns a dict with keys: priority, tags, due_date, recurrence,
+    reminder_enabled.  All values default to safe fallbacks so that
+    callers never need to guard against ``None``.
+    """
+    lower = message.lower()
+
+    # Priority
+    priority = "medium"
+    for keyword, level in _PRIORITY_MAP.items():
+        if keyword in lower:
+            priority = level
+            break
+
+    # Tags — #tag patterns
+    tags = re.findall(r"#(\w+)", message)
+
+    # Due date — "by YYYY-MM-DD" or "due YYYY-MM-DD"
+    due_date = None
+    date_match = re.search(r"(?:by|due|before)\s+(\d{4}-\d{2}-\d{2})", lower)
+    if date_match:
+        try:
+            due_date = datetime.fromisoformat(date_match.group(1))
+        except ValueError:
+            pass
+
+    # Recurrence
+    recurrence = "none"
+    for keyword, pattern in _RECURRENCE_MAP.items():
+        if keyword in lower:
+            recurrence = pattern
+            break
+
+    # Reminder
+    reminder_enabled = any(kw in lower for kw in ["remind", "reminder", "alert me"])
+
+    return {
+        "priority": priority,
+        "tags": tags or None,
+        "due_date": due_date,
+        "recurrence": recurrence,
+        "reminder_enabled": reminder_enabled,
+    }
 
 
-class TaskListResponse(BaseModel):
-    tasks: List[TaskResponse]
+def _extract_title(message: str) -> Optional[str]:
+    """Pull a task title from natural language.
+
+    Tries quoted strings first, then falls back to keyword extraction.
+    """
+    # Quoted title
+    match = re.search(r'"([^"]+)"', message)
+    if match:
+        return match.group(1).strip()
+
+    # After "task/todo" keyword
+    match = re.search(
+        r"(?:add|create|make)\s+(?:a\s+|an\s+|the\s+)?(?:task|todo)\s+"
+        r"(?:to\s+|for\s+|about\s+)?(.+?)(?:\.|!|\?|$)",
+        message,
+        re.IGNORECASE,
+    )
+    if match:
+        title = match.group(1).strip()
+        # Strip trailing metadata tokens so they don't leak into the title
+        title = re.sub(
+            r"\s*(?:#\w+|(?:high|low|medium|urgent)\s+priority|"
+            r"(?:by|due)\s+\d{4}-\d{2}-\d{2}|daily|weekly|monthly|"
+            r"remind(?:er)?(?:\s+me)?).*$",
+            "",
+            title,
+            flags=re.IGNORECASE,
+        ).strip()
+        return title or None
+
+    return None
 
 
-class TaskStatsResponse(BaseModel):
-    total: int
-    completed: int
-    pending: int
+def _extract_task_id(message: str) -> Optional[int]:
+    """Find the first integer (optionally preceded by '#') in *message*."""
+    match = re.search(r"#?(\d+)", message)
+    return int(match.group(1)) if match else None
+
+
+def _extract_update_fields(message: str) -> Dict[str, Any]:
+    """Parse partial-update fields from an update command.
+
+    Supports:
+        title   — update task 1 title to "new name"
+        priority — set priority to high
+        tags    — add tag #work
+    """
+    fields: Dict[str, Any] = {}
+
+    # Title
+    title_match = re.search(r'(?:title\s+)?(?:to|as|is)\s+"([^"]*)"', message)
+    if title_match:
+        fields["title"] = title_match.group(1).strip()
+
+    # Priority
+    pri_match = re.search(
+        r"(?:priority|pri)\s+(?:to\s+)?(high|medium|low|urgent)", message, re.IGNORECASE
+    )
+    if pri_match:
+        fields["priority"] = _PRIORITY_MAP.get(pri_match.group(1).lower(), "medium")
+
+    # Tags (additive)
+    tags = re.findall(r"#(\w+)", message)
+    if tags:
+        fields["tags"] = tags
+
+    return fields
+
+
+# ── Helper: publish event returned by MCPTaskService ──────────────────
+
+async def _publish_if_present(result: Dict[str, Any], events_published: list) -> None:
+    """If *result* contains an ``event`` key, publish it and track it."""
+    event = result.get("event")
+    if event:
+        await event_bus.publish(TOPIC_TASK_LIFECYCLE, event)
+        events_published.append(event)
+
+
+# ── Intent Detection ────────────────────────────────────────────────────
+
+def _is_add(msg: str) -> bool:
+    return (
+        any(w in msg for w in ("add", "create", "make"))
+        and any(w in msg for w in ("task", "todo"))
+    )
+
+
+def _is_list(msg: str) -> bool:
+    return (
+        any(w in msg for w in ("list", "show", "display", "get"))
+        and any(w in msg for w in ("task", "todo", "my"))
+    )
+
+
+def _is_complete(msg: str) -> bool:
+    return (
+        any(w in msg for w in ("complete", "finish", "done", "mark"))
+        and any(w in msg for w in ("task", "todo"))
+    )
+
+
+def _is_delete(msg: str) -> bool:
+    return (
+        any(w in msg for w in ("delete", "remove", "cancel"))
+        and any(w in msg for w in ("task", "todo"))
+    )
+
+
+def _is_update(msg: str) -> bool:
+    return (
+        any(w in msg for w in ("update", "change", "modify", "edit", "set"))
+        and any(w in msg for w in ("task", "todo"))
+    )
+
+
+# ── Chat Endpoint ───────────────────────────────────────────────────────
 
 @router.post("/{user_id}/chat", response_model=ChatResponse)
 async def chat_endpoint(
     user_id: str,
     request: ChatRequest,
-    current_user = Depends(get_current_user_from_token),
-    session: Session = Depends(get_session)
+    current_user=Depends(get_current_user_from_token),
+    session: Session = Depends(get_session),
 ):
-    """
-    Chat endpoint that handles task operations directly in the database.
-    Server holds NO conversational state in memory.
+    """Stateless chat endpoint.
+
+    Flow for every request:
+      1. Authenticate → derive effective_user_id
+      2. Parse intent + extract metadata
+      3. Execute via MCPTaskService (writes to DB)
+      4. Publish lifecycle event (fire-and-forget)
+      5. Persist conversation turn (user msg + assistant msg)
+      6. Return immediate ChatResponse
     """
     try:
-        # Use the authenticated user's ID for all operations
-        # This is more secure than trusting the path parameter
         effective_user_id = str(current_user.id)
+        logger.info("Chat request from user %s", effective_user_id)
 
-        # Validate that the authenticated user matches the requested user_id
-        if effective_user_id != user_id:
-            print(f"Warning: Path user_id {user_id} does not match authenticated user_id {effective_user_id}")
-            # For security, we'll use the authenticated user's ID instead of the path parameter
-            # This prevents unauthorized access to other users' tasks
+        msg_lower = request.message.lower()
 
-        # Log for debugging
-        print(f"Chat endpoint called for user_id: {user_id}, effective_user_id: {effective_user_id}")
-
-        # Determine intent from the message
-        message_lower = request.message.lower()
-
-        # Initialize variables for response
         response_text = ""
-        tool_calls = []
-        task_operations = {}
+        tool_calls: List[Dict[str, Any]] = []
+        task_operations: Dict[str, Any] = {}
+        events_published: List[Dict[str, Any]] = []
 
-        # Handle different task operations based on intent
-        if any(word in message_lower for word in ["add", "create", "make"]) and any(word in message_lower for word in ["task", "todo"]):
-            # Extract task information from message
-            import re
-            # Look for task title in quotes or after task keywords
-            title_match = re.search(r'"([^"]*)"', request.message) or re.search(r'(?:add|create|make) (?:a |an |the )?(?:task|todo) (?:to |for |about )?([^.!?]+?)(?:\.|!|\?|$)', request.message, re.IGNORECASE)
+        # ── ADD TASK ────────────────────────────────────────────────
+        if _is_add(msg_lower):
+            title = _extract_title(request.message)
+            if title:
+                meta = _extract_task_metadata(request.message)
 
-            if title_match:
-                title = title_match.group(1).strip()
-                # Clean up the title by removing common prefixes
-                title = re.sub(r'^(to |that |will )', '', title, flags=re.IGNORECASE).strip()
-
-                print(f"Creating task with title: {title}, user_id: {effective_user_id}")
-
-                # Use shared service to add task
-                from app.services.task_service import TaskService
-                # Use the TaskCreate model from the models module
-                from app.models.chat_models import TaskCreate as ModelTaskCreate
-                task_data = ModelTaskCreate(
+                result = MCPTaskService.add_task(
+                    session=session,
+                    user_id=effective_user_id,
                     title=title,
                     description="Added via chatbot",
-                    completed=False,
-                    due_date=None,
-                    reminder_date=None,
-                    priority="medium"
+                    priority=meta["priority"],
+                    tags=meta["tags"],
+                    due_date=meta["due_date"],
+                    recurrence=meta["recurrence"],
+                    reminder_enabled=meta["reminder_enabled"],
                 )
 
-                new_task = TaskService.create_task(session, effective_user_id, task_data)
-                print(f"Task created successfully: {new_task.id}")
+                tool_calls.append({"name": "add_task", "arguments": {"title": title, **meta}})
 
-                tool_calls.append({"name": "add_task", "arguments": {"title": title}})
-                task_operations["add_task"] = {"status": "success", "task_id": new_task.id, "title": title}
+                if result.get("status") == "success":
+                    task_id = result["task_id"]
+                    await _publish_if_present(result, events_published)
 
-                response_text = f"I've added the task '{title}' to your list (ID: {new_task.id})."
+                    task_operations["add_task"] = {
+                        "status": "success",
+                        "task_id": task_id,
+                        "title": title,
+                    }
+                    response_text = f"I've added the task '{title}' to your list (ID: {task_id})."
+                else:
+                    task_operations["add_task"] = {"status": "error", "message": result.get("message", "Unknown error")}
+                    response_text = "Sorry, I couldn't add that task. Please try again."
             else:
-                response_text = "I need a title for the new task. Please specify what task you'd like to add."
-                task_operations["add_task"] = {"status": "error", "message": "No task title found in message"}
+                task_operations["add_task"] = {"status": "error", "message": "No task title found"}
+                response_text = (
+                    "I need a title for the new task. Please specify what task you'd "
+                    "like to add (e.g., 'add task Buy groceries')."
+                )
 
-        elif any(word in message_lower for word in ["list", "show", "display", "get"]) and any(word in message_lower for word in ["task", "todo", "my"]):
-            # List tasks for the user using shared service
-            from app.services.task_service import TaskService
-            tasks = TaskService.get_tasks_for_user(session, effective_user_id)
-            print(f"Fetched {len(tasks)} tasks for user {effective_user_id}")
-
+        # ── LIST TASKS ──────────────────────────────────────────────
+        elif _is_list(msg_lower):
+            result = MCPTaskService.list_tasks(session=session, user_id=effective_user_id)
+            tasks = result.get("tasks", [])
             tool_calls.append({"name": "list_tasks", "arguments": {"count": len(tasks)}})
 
             if tasks:
-                # Create a detailed list with IDs
-                task_details = []
-                for task in tasks:
-                    status = 'completed' if task.completed else 'pending'
-                    task_details.append(f"- #{task.id}: {task.title} ({status})")
+                lines = []
+                for t in tasks:
+                    stat = "completed" if t["completed"] else "pending"
+                    pri = t.get("priority", "medium")
+                    tags_str = " ".join(f"#{tg}" for tg in (t.get("tags") or []))
+                    line = f"  - #{t['id']}: {t['title']} ({stat}, {pri})"
+                    if tags_str:
+                        line += f" {tags_str}"
+                    if t.get("due_date"):
+                        line += f" due {t['due_date'][:10]}"
+                    if t.get("recurrence", "none") != "none":
+                        line += f" [{t['recurrence']}]"
+                    lines.append(line)
 
-                response_text = f"Here are your {len(tasks)} tasks:\n" + "\n".join(task_details)
-                task_operations["list_tasks"] = {
-                    "status": "success",
-                    "count": len(tasks),
-                    "tasks": [{"id": task.id, "title": task.title, "completed": task.completed} for task in tasks]
-                }
+                response_text = f"Here are your {len(tasks)} tasks:\n" + "\n".join(lines)
+                task_operations["list_tasks"] = {"status": "success", "count": len(tasks), "tasks": tasks}
             else:
-                response_text = "You have no tasks."
+                response_text = "You have no tasks yet. Try 'add task Buy groceries' to get started!"
                 task_operations["list_tasks"] = {"status": "success", "count": 0, "tasks": []}
 
-        elif any(word in message_lower for word in ["complete", "finish", "done", "mark"]) and any(word in message_lower for word in ["task", "todo"]):
-            # Extract task ID - look for numbers in the message
-            import re
-            id_matches = re.findall(r'#?(\d+)', request.message)
+        # ── COMPLETE TASK ───────────────────────────────────────────
+        elif _is_complete(msg_lower):
+            task_id = _extract_task_id(request.message)
+            if task_id:
+                result = MCPTaskService.complete_task(
+                    session=session, task_id=task_id, user_id=effective_user_id
+                )
+                tool_calls.append({"name": "complete_task", "arguments": {"task_id": task_id}})
 
-            if id_matches:
-                # Take the first number found as the task ID
-                task_id = int(id_matches[0])
-                print(f"Toggling completion for task {task_id} for user {effective_user_id}")
+                if result.get("status") == "success":
+                    await _publish_if_present(result, events_published)
 
-                # Use shared service to update task status
-                from app.services.task_service import TaskService
-                updated_task = TaskService.toggle_task_completion(session, task_id, effective_user_id)
-
-                if updated_task:
-                    response_text = f"I've marked task #{task_id} '{updated_task.title}' as completed."
-                    print(f"Successfully completed task {task_id}")
-
-                    tool_calls.append({"name": "complete_task", "arguments": {"task_id": task_id}})
+                    task_after = TaskService.get_task_by_id(session, task_id, effective_user_id)
+                    task_title = task_after.title if task_after else f"#{task_id}"
                     task_operations["complete_task"] = {
                         "status": "success",
                         "task_id": task_id,
-                        "title": updated_task.title,
-                        "completed": updated_task.completed
+                        "title": task_title,
+                        "completed": True,
                     }
+                    response_text = f"I've marked task #{task_id} '{task_title}' as completed."
                 else:
-                    response_text = f"Task #{task_id} not found."
-                    print(f"Task {task_id} not found for user {effective_user_id}")
-
                     task_operations["complete_task"] = {
                         "status": "error",
                         "task_id": task_id,
-                        "message": "Task not found"
+                        "message": "Task not found",
                     }
-            else:
-                response_text = "Please specify which task number you'd like to complete (e.g., 'complete task 1')."
-                task_operations["complete_task"] = {"status": "error", "message": "No task ID found in message"}
-
-        elif any(word in message_lower for word in ["delete", "remove", "cancel"]) and any(word in message_lower for word in ["task", "todo"]):
-            # Extract task ID
-            import re
-            id_matches = re.findall(r'#?(\d+)', request.message)
-
-            if id_matches:
-                task_id = int(id_matches[0])
-                print(f"Deleting task {task_id} for user {effective_user_id}")
-
-                # Use shared service to delete task
-                from app.services.task_service import TaskService
-                success = TaskService.delete_task(session, task_id, effective_user_id)
-
-                if success:
-                    response_text = f"I've deleted task #{task_id}."
-                    print(f"Successfully deleted task {task_id}")
-
-                    tool_calls.append({"name": "delete_task", "arguments": {"task_id": task_id}})
-                    task_operations["delete_task"] = {"status": "success", "task_id": task_id}
-                else:
                     response_text = f"Task #{task_id} not found."
-                    print(f"Task {task_id} not found for user {effective_user_id}")
+            else:
+                task_operations["complete_task"] = {"status": "error", "message": "No task ID found"}
+                response_text = "Please specify which task to complete (e.g., 'complete task 1')."
 
+        # ── DELETE TASK ─────────────────────────────────────────────
+        elif _is_delete(msg_lower):
+            task_id = _extract_task_id(request.message)
+            if task_id:
+                result = MCPTaskService.delete_task(
+                    session=session, task_id=task_id, user_id=effective_user_id
+                )
+                tool_calls.append({"name": "delete_task", "arguments": {"task_id": task_id}})
+
+                if result.get("status") == "success":
+                    await _publish_if_present(result, events_published)
+
+                    task_operations["delete_task"] = {"status": "success", "task_id": task_id}
+                    response_text = f"I've deleted task #{task_id}."
+                else:
                     task_operations["delete_task"] = {
                         "status": "error",
                         "task_id": task_id,
-                        "message": "Task not found"
+                        "message": "Task not found",
                     }
+                    response_text = f"Task #{task_id} not found."
             else:
-                response_text = "Please specify which task number you'd like to delete (e.g., 'delete task 1')."
-                task_operations["delete_task"] = {"status": "error", "message": "No task ID found in message"}
+                task_operations["delete_task"] = {"status": "error", "message": "No task ID found"}
+                response_text = "Please specify which task to delete (e.g., 'delete task 1')."
 
-        elif any(word in message_lower for word in ["update", "change", "modify"]) and any(word in message_lower for word in ["task", "todo"]):
-            # Handle task updates - look for task ID and new information
-            import re
-            id_matches = re.findall(r'#?(\d+)', request.message)
+        # ── UPDATE TASK ─────────────────────────────────────────────
+        elif _is_update(msg_lower):
+            task_id = _extract_task_id(request.message)
+            if task_id:
+                fields = _extract_update_fields(request.message)
+                # Also merge any metadata extracted from the message
+                meta = _extract_task_metadata(request.message)
+                if "priority" not in fields and meta["priority"] != "medium":
+                    fields["priority"] = meta["priority"]
+                if "tags" not in fields and meta["tags"]:
+                    fields["tags"] = meta["tags"]
 
-            if id_matches:
-                task_id = int(id_matches[0])
+                if fields:
+                    result = MCPTaskService.update_task(
+                        session=session,
+                        task_id=task_id,
+                        user_id=effective_user_id,
+                        **fields,
+                    )
+                    tool_calls.append({
+                        "name": "update_task",
+                        "arguments": {"task_id": task_id, **fields},
+                    })
 
-                # Look for title updates
-                title_update_match = re.search(r'(?:to|as|is) "([^"]*)"', request.message)
+                    if result.get("status") == "success":
+                        task_after = TaskService.get_task_by_id(session, task_id, effective_user_id)
+                        event = make_task_event(
+                            EVENT_TASK_UPDATED,
+                            effective_user_id,
+                            task_id,
+                            _task_payload(task_after) if task_after else {},
+                        )
+                        await event_bus.publish(TOPIC_TASK_LIFECYCLE, event)
+                        events_published.append(event)
 
-                if title_update_match:
-                    new_title = title_update_match.group(1).strip()
-
-                    from app.services.task_service import TaskService
-                    from app.models.chat_models import TaskUpdate as ModelTaskUpdate
-
-                    update_data = ModelTaskUpdate(title=new_title)
-                    updated_task = TaskService.update_task(session, task_id, effective_user_id, update_data)
-
-                    if updated_task:
-                        response_text = f"I've updated task #{task_id} title to '{new_title}'."
-
-                        tool_calls.append({"name": "update_task", "arguments": {"task_id": task_id, "field": "title", "value": new_title}})
+                        changed = ", ".join(f"{k}={v}" for k, v in fields.items())
                         task_operations["update_task"] = {
                             "status": "success",
                             "task_id": task_id,
-                            "field": "title",
-                            "new_value": new_title
+                            "updated_fields": fields,
                         }
+                        response_text = f"I've updated task #{task_id} ({changed})."
                     else:
-                        response_text = f"Task #{task_id} not found."
                         task_operations["update_task"] = {
                             "status": "error",
                             "task_id": task_id,
-                            "message": "Task not found"
+                            "message": "Task not found",
                         }
+                        response_text = f"Task #{task_id} not found."
                 else:
-                    response_text = f"Please specify what you'd like to update for task #{task_id} (e.g., 'update task {task_id} title to \"new title\"')."
-                    task_operations["update_task"] = {"status": "error", "message": "No update details found in message"}
+                    task_operations["update_task"] = {
+                        "status": "error",
+                        "message": "No update details found",
+                    }
+                    response_text = (
+                        f"Please specify what to change on task #{task_id} "
+                        f'(e.g., \'update task {task_id} title to "new title"\').'
+                    )
             else:
-                response_text = "Please specify which task number you'd like to update (e.g., 'update task 1')."
-                task_operations["update_task"] = {"status": "error", "message": "No task ID found in message"}
+                task_operations["update_task"] = {"status": "error", "message": "No task ID found"}
+                response_text = "Please specify which task to update (e.g., 'update task 1')."
 
+        # ── FALLBACK ────────────────────────────────────────────────
         else:
-            # Default response for non-task-related queries
-            response_text = f"I received your message: '{request.message}'. How can I help you with your tasks today? You can say things like 'add task Buy groceries', 'list my tasks', 'complete task 1', or 'delete task 2'."
+            response_text = (
+                f"I received your message: '{request.message}'. "
+                "How can I help you with your tasks today? You can say things like "
+                "'add task Buy groceries', 'list my tasks', 'complete task 1', "
+                "'update task 1 priority to high', or 'delete task 2'."
+            )
             task_operations["general_query"] = {"status": "success", "message": "General query processed"}
 
-        # Generate or retrieve conversation ID
-        conversation_id = getattr(request, 'conversation_id', None) or f"conv_{effective_user_id}_{int(datetime.now().timestamp())}"
+        # ── Persist conversation (stateless — DB is sole state store) ───
+        conversation_id = (
+            getattr(request, "conversation_id", None)
+            or f"conv_{effective_user_id}_{int(datetime.now().timestamp())}"
+        )
 
-        # Store the conversation and message in the database
-        from app.models.chat_models import Conversation, Message
-
-        # Check if conversation exists, create if not
-        from sqlmodel import select
-        existing_conv = session.exec(select(Conversation).where(Conversation.id == conversation_id)).first()
-
+        existing_conv = session.exec(
+            select(Conversation).where(Conversation.id == conversation_id)
+        ).first()
         if not existing_conv:
-            # Create new conversation
-            conversation = Conversation(
-                id=conversation_id,
-                user_id=effective_user_id,
-                title=request.message[:50] + "..." if len(request.message) > 50 else request.message
+            session.add(
+                Conversation(
+                    id=conversation_id,
+                    user_id=effective_user_id,
+                    title=(
+                        request.message[:50] + "..."
+                        if len(request.message) > 50
+                        else request.message
+                    ),
+                )
             )
-            session.add(conversation)
 
-        # Add the user's message
-        user_message = Message(
-            conversation_id=conversation_id,
-            user_id=effective_user_id,
-            role="user",
-            content=request.message
+        session.add(
+            Message(
+                conversation_id=conversation_id,
+                user_id=effective_user_id,
+                role="user",
+                content=request.message,
+            )
         )
-        session.add(user_message)
-
-        # Add the assistant's response
-        assistant_message = Message(
-            conversation_id=conversation_id,
-            user_id=effective_user_id,  # The assistant acts on behalf of the user
-            role="assistant",
-            content=response_text
+        session.add(
+            Message(
+                conversation_id=conversation_id,
+                user_id=effective_user_id,
+                role="assistant",
+                content=response_text,
+            )
         )
-        session.add(assistant_message)
-
-        # Commit all changes
         session.commit()
 
         return ChatResponse(
             response=response_text,
             conversation_id=conversation_id,
             tool_calls=tool_calls,
-            task_operations=task_operations
+            task_operations=task_operations,
+            events_published=events_published or None,
         )
+
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"Chat processing error: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Chat processing error: {str(e)}"
-        )
+        logger.exception("Chat processing error")
+        raise HTTPException(status_code=500, detail=f"Chat processing error: {e}")
 
 
+# ── SSE Event Stream ───────────────────────────────────────────────────
 
+@router.get("/{user_id}/events")
+async def event_stream(
+    user_id: str,
+    request: Request,
+    token: str = None,
+    session: Session = Depends(get_session),
+):
+    """Server-Sent Events endpoint for real-time task event updates.
+
+    Accepts auth via ``?token=`` query param (EventSource can't set headers).
+    The client opens a persistent connection and receives JSON events
+    whenever a task lifecycle event is published for the authenticated user.
+    """
+    # Authenticate via query-param token (EventSource limitation)
+    if not token:
+        raise HTTPException(status_code=401, detail="Token required")
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email = payload.get("sub")
+        if not email:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        user = session.exec(select(User).where(User.email == email)).first()
+        if not user:
+            raise HTTPException(status_code=401, detail="User not found")
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    effective_user_id = str(user.id)
+    queue = sse_connect(effective_user_id)
+
+    async def _generate():
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                    yield {
+                        "event": event.get("event_type", "task.event"),
+                        "data": json_module.dumps(event),
+                    }
+                except asyncio.TimeoutError:
+                    # Send keepalive comment to prevent connection timeout
+                    yield {"comment": "keepalive"}
+        finally:
+            sse_disconnect(effective_user_id, queue)
+
+    return EventSourceResponse(_generate())
+
+
+# ── Health ──────────────────────────────────────────────────────────────
 
 @router.get("/health")
 def health_check():

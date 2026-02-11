@@ -16,11 +16,11 @@ frontend:
   livenessProbe:
     httpGet:
       path: /
-      port: http # This needs to be configured in deployment.yaml to map to container port
+      port: http
   readinessProbe:
     httpGet:
       path: /
-      port: http # This needs to be configured in deployment.yaml to map to container port
+      port: http
 
 
 backend:
@@ -40,6 +40,72 @@ backend:
     httpGet:
       path: /
       port: http
+  env:
+    SECRET_KEY: "your-super-secret-key-change-in-production"
+    EVENT_BUS_BACKEND: "redis"
+
+# ── PostgreSQL ────────────────────────────────────────────────────────
+postgresql:
+  enabled: true
+  image:
+    repository: postgres
+    tag: "15"
+    pullPolicy: IfNotPresent
+  containerName: postgresql
+  auth:
+    database: todo_db
+    username: postgres
+    password: password
+  service:
+    type: ClusterIP
+    port: 5432
+  persistence:
+    enabled: true
+    size: 1Gi
+    storageClass: ""
+    accessModes:
+      - ReadWriteOnce
+  healthcheck:
+    enabled: true
+    intervalSeconds: 5
+    timeoutSeconds: 5
+    failureThreshold: 5
+  resources: {}
+    # limits:
+    #   cpu: 250m
+    #   memory: 256Mi
+    # requests:
+    #   cpu: 100m
+    #   memory: 128Mi
+
+# ── Redis ─────────────────────────────────────────────────────────────
+redis:
+  enabled: true
+  image:
+    repository: redis
+    tag: "7-alpine"
+    pullPolicy: IfNotPresent
+  containerName: redis
+  service:
+    type: ClusterIP
+    port: 6379
+  args:
+    - redis-server
+    - --appendonly
+    - "yes"
+  persistence:
+    enabled: true
+    size: 500Mi
+    storageClass: ""
+    accessModes:
+      - ReadWriteOnce
+  resources: {}
+    # limits:
+    #   cpu: 100m
+    #   memory: 128Mi
+    # requests:
+    #   cpu: 50m
+    #   memory: 64Mi
 
 imagePullSecrets: []
 nameOverride: ""
@@ -107,5 +173,3 @@ nodeSelector: {}
 tolerations: []
 
 affinity: {}
-
-
