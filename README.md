@@ -61,22 +61,9 @@ hackathon-todo/
 
 3. **Configure environment variables:**
 
-   Create a `.env` file in the backend directory:
-   ```env
-   # Database Configuration
-   DATABASE_URL='sqlite:///./todo_app.db'
-
-   # JWT Configuration
-   SECRET_KEY=your-super-secret-and-long-random-string-here-change-this-in-production
-   ALGORITHM=HS256
-   ACCESS_TOKEN_EXPIRE_MINUTES=1440
-
-   # Application Configuration
-   DEBUG=True
-   APP_NAME=Todo App API
-   VERSION=1.0.0
-   HOST=0.0.0.0
-   PORT=8000
+   ```bash
+   cp .env.production .env
+   # Edit .env and fill in your own values
    ```
 
 4. **Start the main server:**
@@ -132,44 +119,14 @@ The chat endpoint supports natural language commands:
 
 ## Deployment
 
-### Environment Variables for Production
-```env
-# Database Configuration
-DATABASE_URL='postgresql://username:password@localhost/todo_db'
-
-# JWT Configuration
-SECRET_KEY=your-very-long-secret-key-change-this-in-production
-ALGORITHM=HS256
-ACCESS_TOKEN_EXPIRE_MINUTES=1440
-
-# Application Configuration
-DEBUG=False
-APP_NAME=Todo App API
-VERSION=1.0.0
-HOST=0.0.0.0
-PORT=8000
-```
-
 ### Docker Deployment
-```dockerfile
-FROM python:3.11-slim
-
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install -r requirements.txt
-
-COPY . .
-
-EXPOSE 8000
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
-```
-
-### Production Server
-Use a production WSGI/ASGI server like Gunicorn:
 ```bash
-pip install gunicorn
-gunicorn -w 4 -k uvicorn.workers.UvicornWorker main:app --bind 0.0.0.0:8000
+cp .env.production .env
+# Edit .env with strong passwords and secrets
+docker compose up --build -d
 ```
+
+See `.env.production` for the list of required environment variables.
 
 ## Features
 
@@ -272,14 +229,7 @@ The `values.yaml` file contains configurable parameters for all services, allowi
 
 ### Environment Configuration
 
-Key environment variables required for Kubernetes deployment:
-
-- `DATABASE_URL`: Connection string for PostgreSQL database (e.g., `postgresql://user:pass@postgresql:5432/todo_db`)
-- `SECRET_KEY`: JWT secret key for authentication
-- `DEBUG`: Boolean flag to enable/disable debug mode
-- `NODE_ENV`: Environment mode for frontend (development/production)
-
-These variables are typically configured through ConfigMaps and Secrets in Kubernetes.
+Key environment variables required for Kubernetes deployment are configured through ConfigMaps and Secrets. See `.env.production` for the full list of required variables.
 
 ### Validation Checklist
 

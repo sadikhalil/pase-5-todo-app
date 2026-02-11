@@ -102,22 +102,9 @@ backend/
 
 2. **Configure environment variables:**
 
-   Create a `.env` file in the backend directory:
-   ```env
-   # Database Configuration
-   DATABASE_URL='sqlite:///./todo_app.db'
-
-   # JWT Configuration
-   SECRET_KEY=your-super-secret-and-long-random-string-here-change-this-in-production
-   ALGORITHM=HS256
-   ACCESS_TOKEN_EXPIRE_MINUTES=1440
-
-   # Application Configuration
-   DEBUG=True
-   APP_NAME=Todo App API
-   VERSION=1.0.0
-   HOST=0.0.0.0
-   PORT=8000
+   ```bash
+   cp ../.env.production ../.env
+   # Edit .env and fill in your own values
    ```
 
 3. **Run main API server:**
@@ -164,58 +151,18 @@ The chat endpoint supports natural language processing for task operations:
 
 ## Database Configuration
 
-### SQLite (Default)
-Uses a local SQLite file database:
-```
-DATABASE_URL='sqlite:///./todo_app.db'
-```
-
-### PostgreSQL (Production)
-For production deployments, use PostgreSQL:
-```
-DATABASE_URL='postgresql://username:password@localhost/todo_db'
-```
+- **Development**: SQLite (default when `DATABASE_URL` is not set)
+- **Production**: PostgreSQL (set `DATABASE_URL` in `.env`)
 
 ## Deployment
 
-### Environment Variables for Production
-```env
-# Database Configuration
-DATABASE_URL='postgresql://username:password@localhost/todo_db'
-
-# JWT Configuration
-SECRET_KEY=your-very-long-secret-key-change-this-in-production
-ALGORITHM=HS256
-ACCESS_TOKEN_EXPIRE_MINUTES=1440
-
-# Application Configuration
-DEBUG=False
-APP_NAME=Todo App API
-VERSION=1.0.0
-HOST=0.0.0.0
-PORT=8000
-```
-
-### Docker Deployment
-```dockerfile
-FROM python:3.11-slim
-
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install -r requirements.txt
-
-COPY . .
-
-EXPOSE 8000
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
-```
-
-### Production Server
-Use a production WSGI/ASGI server like Gunicorn:
 ```bash
-pip install gunicorn
-gunicorn -w 4 -k uvicorn.workers.UvicornWorker main:app --bind 0.0.0.0:8000
+cp ../.env.production ../.env
+# Edit .env with strong passwords and secrets
+docker compose up --build -d
 ```
+
+See `.env.production` for the list of required environment variables.
 
 ## Security
 
